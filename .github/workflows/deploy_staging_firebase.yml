@@ -1,0 +1,83 @@
+name: Deploy Staging build to Firebase
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+
+jobs:
+  build_and_deploy_staging:
+    name: Build & Deploy Staging
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache Gradle
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.gradle/caches/modules-*
+            ~/.gradle/caches/jars-*
+            ~/.gradle/caches/build-cache-*
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up signing properties
+        env:
+          SIGNING_PROPERTIES: ${{ secrets.SIGNING_PROPERTIES }}
+        run: |
+          echo -e $SIGNING_PROPERTIES | base64 -d > signing.properties
+
+      - name: Set up staging properties
+        env:
+          ENV_PROPERTIES: ${{ secrets.ENV_PROPERTIES }}
+        run: |
+          echo -e $ENV_PROPERTIES | base64 -d > env.properties
+
+      - name: Set up Google Services json
+        env:
+          FIREBASE_GOOGLE_SERVICES_JSON: ${{ secrets.FIREBASE_GOOGLE_SERVICES_JSON }}
+        run: |
+          echo $FIREBASE_GOOGLE_SERVICES_JSON | base64 -d > app/google-services.json
+
+      - name: Bump version code
+        run: |
+          perl -i -pe 's/ANDROID_VERSION_CODE =(.*)$/ANDROID_VERSION_CODE = ${{github.run_number}}/g' buildSrc/src/main/java/Versions.kt
+
+      - name: Set up release keystore
+        env:
+          RELEASE_KEYSTORE: ${{ secrets.RELEASE_KEYSTORE }}
+        run: |
+          echo -e $RELEASE_KEYSTORE | base64 -d > config/release.keystore
+
+      - name: Build staging APK
+        run: ./gradlew assembleStagingRelease
+
+      - name: Generate release notes
+        id: generate-release-notes
+        run: |
+          echo 'RELEASE_NOTE_CONTENT<<EOF' >> $GITHUB_OUTPUT
+          echo "$(git log --merges --pretty=%B $(git describe --tags $(git rev-list --tags --max-count=1))..HEAD | grep "\[")" >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      - name: Deploy Android Staging to Firebase
+        uses: wzieba/Firebase-Distribution-Github-Action@v1.5.0
+        with:
+          appId: ${{ secrets.FIREBASE_ANDROID_APP_ID }}
+          serviceCredentialsFileContent: ${{ secrets.FIREBASE_DISTRIBUTION_CREDENTIAL_JSON }}
+          groups: ${{ secrets.FIREBASE_DISTRIBUTION_TESTER_GROUPS }}
+          file: app/build/outputs/apk/staging/release/app-staging-release.apk
+          releaseNotes: ${{ steps.generate-release-notes.outputs.RELEASE_NOTE_CONTENT }}
